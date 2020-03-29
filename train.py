@@ -10,7 +10,7 @@ from model.fresnetv2 import resnet18
 from margin.ArcLoss import ArcLossMargin
 from train_dataloader import FaceRecognitionTrainDataset, train_dataset_transform, DataLoader
 from val_dataloader import FaceRecognitionValDataset, val_dataset_transform
-from verification import evaluate
+from verification import get_val_features
 
 mixed_precision = True
 try:  # Mixed precision training https://github.com/NVIDIA/apex
@@ -39,11 +39,17 @@ train_dataset = FaceRecognitionTrainDataset(train_list='./dataset/train.lst', tr
 train_loader = DataLoader(train_dataset, batch_size=batch_size, pin_memory=True, shuffle=True, num_workers=8)
 len_train = len(train_loader)
 
-val_dataset = FaceRecognitionValDataset(bin_file='../../data/faces_emore/lfw.bin',
-                                        transform=val_dataset_transform)
-len_lfw = len(val_dataset)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, pin_memory=True, shuffle=False, num_workers=8)
-len_val = len(val_loader)
+lfw_dataset = FaceRecognitionValDataset(bin_file='./dataset/lfw.bin', transform=val_dataset_transform)
+len_lfw = len(lfw_dataset)
+lfw_loader = DataLoader(lfw_dataset, batch_size=batch_size, pin_memory=True, shuffle=False, num_workers=8)
+
+cfp_fp_dataset = FaceRecognitionValDataset(bin_file='./dataset/cfp_fp.bin', transform=val_dataset_transform)
+len_cfp_fp = len(cfp_fp_dataset)
+cfp_fp_loader = DataLoader(cfp_fp_dataset, batch_size=batch_size, pin_memory=True, shuffle=False, num_workers=8)
+
+agedb_30_dataset = FaceRecognitionValDataset(bin_file='./dataset/agedb_30.bin', transform=val_dataset_transform)
+len_agedb_30 = len(agedb_30_dataset)
+agedb_30_loader = DataLoader(agedb_30_dataset, batch_size=batch_size, pin_memory=True, shuffle=False, num_workers=8)
 
 print('==> Building model ...')
 backbone = resnet18(num_classes=feature_dim)
@@ -107,38 +113,30 @@ for epoch in range(epochs):
         if iter_idx % 2000 == 0:
             writer.add_embedding(feature, metadata=targets, label_img=inputs, global_step=iter_idx)
             backbone.eval()
-            embedding_list = [np.zeros((len_lfw, feature_dim)), np.zeros((len_lfw, feature_dim))]
-            with torch.no_grad():
-                test_batch = 0
-                for image1, image2 in val_loader:
-                    image1, image2 = image1.to(device), image2.to(device)
-                    embedding1, embedding2 = backbone(image1), backbone(image2)
-                    embedding1, embedding2 = embedding1.detach().cpu().numpy(), embedding2.detach().cpu().numpy()
-                    embedding_list[0][test_batch * batch_size:(test_batch + 1) * batch_size] = embedding1
-                    embedding_list[1][test_batch * batch_size:(test_batch + 1) * batch_size] = embedding2
-                    test_batch += 1
-            embeddings = embedding_list[0] + embedding_list[1]
-            embeddings = sklearn.preprocessing.normalize(embeddings)
-            _, _, accuracy, val, val_std, far = evaluate(embeddings, val_dataset.issame_list)
-            acc2, std2 = np.mean(accuracy), np.std(accuracy)
-            print(acc2)
+            lfw_acc, _ = get_val_features(backbone, lfw_loader, lfw_dataset.issame_list, lfw_dataset.dataset_name,
+                                          len_lfw, feature_dim, batch_size, device)
+            cfp_fp_acc, _ = get_val_features(backbone, cfp_fp_loader, cfp_fp_dataset.issame_list,
+                                             cfp_fp_dataset.dataset_name, len_cfp_fp, feature_dim, batch_size, device)
+            agedb_30_acc, _ = get_val_features(backbone, agedb_30_loader, agedb_30_dataset.issame_list,
+                                               agedb_30_dataset.dataset_name, len_agedb_30, feature_dim, batch_size,
+                                               device)
 
-            if acc2 > best_acc:
+            if agedb_30_acc > best_acc:
                 backbone_state = {
                     'net': backbone.state_dict(),
-                    'acc': acc2,
+                    'acc': agedb_30_acc,
                     'epoch': epoch,
                 }
                 margin_state = {
                     'net': margin.state_dict(),
-                    'acc': acc2,
+                    'acc': agedb_30_acc,
                     'epoch': epoch,
                 }
                 if not os.path.isdir('weights'):
                     os.mkdir('weights')
                 torch.save(backbone_state, './weights/backbone.pth')
                 torch.save(margin_state, './weights/margin.pth')
-                best_acc = acc2
+                best_acc = agedb_30_acc
                 print('Saving..\n Better Accuracy: {:.4f}%'.format(best_acc*100))
             else:
                 print('Better Accuracy: {:.4f}%'.format(best_acc * 100))

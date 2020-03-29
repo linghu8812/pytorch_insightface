@@ -35,7 +35,7 @@ class FaceRecognitionTrainDataset(Dataset):
             start_time = time.time()
             for info in self.image_list:
                 _, image_name, image_label = info.split('\t')
-                if int(image_label) > 9999:
+                if int(image_label) > 999:
                     break
                 print(f'Reading {image_name} ...', end="\r")
                 src_img = cv2.imread(image_name)
@@ -48,7 +48,7 @@ class FaceRecognitionTrainDataset(Dataset):
             start_time = time.time()
             for info in self.image_list:
                 _, image_name, image_label = info.split('\t')
-                if int(image_label) > 9999:
+                if int(image_label) > 999:
                     break
                 print(f'Reading {image_name} ...', end="\r")
                 self.image_names.append(image_name)

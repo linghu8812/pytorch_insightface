@@ -1,8 +1,13 @@
+import os
+import time
 import numpy as np
+import torch
 import sklearn
 from sklearn.model_selection import KFold
 from sklearn.decomposition import PCA
 from scipy import interpolate
+from val_dataloader import FaceRecognitionValDataset, val_dataset_transform, DataLoader
+from model.fresnetv2 import resnet18
 
 
 class LFold:
@@ -144,3 +149,62 @@ def evaluate(embeddings, actual_issame, nrof_folds=10, pca=0):
     val, val_std, far = calculate_val(thresholds, embeddings1, embeddings2,
                                       np.asarray(actual_issame), 1e-3, nrof_folds=nrof_folds)
     return tpr, fpr, accuracy, val, val_std, far
+
+
+def get_val_features(backbone, val_loader, issame_list, dataset_name, len_val, feature_dim, batch_size, device):
+    embedding_list = [np.zeros((len_val, feature_dim)), np.zeros((len_val, feature_dim))]
+    print(f'Evaluating {dataset_name} ...')
+    start_time = time.time()
+    with torch.no_grad():
+        test_batch = 0
+        for image1, image2 in val_loader:
+            image1, image2 = image1.to(device), image2.to(device)
+            embedding1, embedding2 = backbone(image1), backbone(image2)
+            embedding1, embedding2 = embedding1.detach().cpu().numpy(), embedding2.detach().cpu().numpy()
+            embedding_list[0][test_batch * batch_size:(test_batch + 1) * batch_size] = embedding1
+            embedding_list[1][test_batch * batch_size:(test_batch + 1) * batch_size] = embedding2
+            test_batch += 1
+    embeddings = embedding_list[0] + embedding_list[1]
+    embeddings = sklearn.preprocessing.normalize(embeddings)
+    _, _, accuracy, val, val_std, far = evaluate(embeddings, issame_list)
+    acc2, std2 = np.mean(accuracy), np.std(accuracy)
+    print(f'Evaluate cost {time.time() - start_time:.2f} sec')
+    print(f'Accuracy is {acc2*100:.4f}, Standard is {std2:f}')
+    return acc2, std2
+
+
+def main():
+    batch_size = 128
+    feature_dim = 512
+    lfw_dataset = FaceRecognitionValDataset(bin_file='./dataset/lfw.bin', transform=val_dataset_transform)
+    len_lfw = len(lfw_dataset)
+    lfw_loader = DataLoader(lfw_dataset, batch_size=batch_size, pin_memory=True, shuffle=False, num_workers=8)
+
+    cfp_fp_dataset = FaceRecognitionValDataset(bin_file='./dataset/cfp_fp.bin', transform=val_dataset_transform)
+    len_cfp_fp = len(cfp_fp_dataset)
+    cfp_fp_loader = DataLoader(cfp_fp_dataset, batch_size=batch_size, pin_memory=True, shuffle=False, num_workers=8)
+
+    agedb_30_dataset = FaceRecognitionValDataset(bin_file='./dataset/agedb_30.bin', transform=val_dataset_transform)
+    len_agedb_30 = len(agedb_30_dataset)
+    agedb_30_loader = DataLoader(agedb_30_dataset, batch_size=batch_size, pin_memory=True, shuffle=False, num_workers=8)
+
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+
+    print('==> Building model ...')
+    backbone = resnet18(num_classes=feature_dim)
+    weights_file = 'weights/backbone.pth'
+    if os.path.exists(weights_file):
+        backbone.load_state_dict(torch.load(weights_file)['net'])
+    backbone = backbone.to(device)
+    backbone.eval()
+    get_val_features(backbone, lfw_loader, lfw_dataset.issame_list, lfw_dataset.dataset_name, len_lfw, feature_dim,
+                     batch_size, device)
+    get_val_features(backbone, cfp_fp_loader, cfp_fp_dataset.issame_list, cfp_fp_dataset.dataset_name, len_cfp_fp,
+                     feature_dim, batch_size, device)
+    get_val_features(backbone, agedb_30_loader, agedb_30_dataset.issame_list, agedb_30_dataset.dataset_name,
+                     len_agedb_30, feature_dim, batch_size, device)
+    return
+
+
+if __name__ == '__main__':
+    main()

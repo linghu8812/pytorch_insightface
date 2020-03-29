@@ -1,4 +1,5 @@
 import cv2
+import time
 import numpy as np
 import pickle
 from torch.utils.data import Dataset, DataLoader
@@ -43,7 +44,11 @@ class FaceRecognitionValDataset(Dataset):
 
     def __init__(self, bin_file, transform=None):
         image_size = (112, 112)
+        self.dataset_name = bin_file.split('/')[-1].split('.')[0]
+        print(f'Loading {self.dataset_name} ...')
+        start_time = time.time()
         self.data_list, self.issame_list = load_bin(bin_file, image_size)
+        print(f'Loading {self.dataset_name} cost {time.time() - start_time:.2f} sec')
         self.transform = transform
 
     def __len__(self):
@@ -59,8 +64,8 @@ class FaceRecognitionValDataset(Dataset):
 
 
 if __name__ == '__main__':
-    face_dataset = FaceRecognitionValDataset(bin_file='/home/linghu8812/data/faces_emore/lfw.bin',
-                                             transform=dataset_transform)
+    face_dataset = FaceRecognitionValDataset(bin_file='./dataset/lfw.bin',
+                                             transform=val_dataset_transform)
     val_loader = DataLoader(face_dataset, batch_size=8, shuffle=False, num_workers=4)
     image1, image2 = iter(val_loader).next()
     sample1, sample2 = image1[0].squeeze(), image2[0].squeeze()
