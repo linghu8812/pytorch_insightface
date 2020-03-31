@@ -1,16 +1,17 @@
 import os
 import time
-import numpy as np
 import math
-import sklearn
 import torch
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from model.fresnetv2 import resnet18
 from margin.ArcLoss import ArcLossMargin
+from margin.MixupArcLoss import MixupArcLossMargin
+from margin.LabelSmoothing import LabelSmoothing
 from train_dataloader import FaceRecognitionTrainDataset, train_dataset_transform, DataLoader
 from val_dataloader import FaceRecognitionValDataset, val_dataset_transform
 from verification import get_val_features
+from mixup import mixup_data, mixup_criterion
 
 mixed_precision = True
 try:  # Mixed precision training https://github.com/NVIDIA/apex
@@ -22,6 +23,7 @@ device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 if device == 'cpu':
     mixed_precision = False
 mixup = 1
+alpha = 1.5
 best_acc = 0  # best test accuracy
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 learning_rate = 0.01
@@ -30,12 +32,12 @@ accumulate = 2
 epochs = 50
 feature_dim = 512
 warmup = 4000
-writer = SummaryWriter(log_dir='logs')
+writer = SummaryWriter(log_dir='logs2')
 
 # Data
 print('==> Preparing data ...')
 
-train_dataset = FaceRecognitionTrainDataset(train_list='./dataset/train.lst', transform=train_dataset_transform)
+train_dataset = FaceRecognitionTrainDataset(train_list='./dataset/train2.lst', transform=train_dataset_transform)
 train_loader = DataLoader(train_dataset, batch_size=batch_size, pin_memory=True, shuffle=True, num_workers=8)
 len_train = len(train_loader)
 
@@ -54,10 +56,14 @@ agedb_30_loader = DataLoader(agedb_30_dataset, batch_size=batch_size, pin_memory
 print('==> Building model ...')
 backbone = resnet18(num_classes=feature_dim)
 backbone = backbone.to(device)
-margin = ArcLossMargin(input_dim=feature_dim, class_number=train_dataset.class_nums)
-margin = margin.to(device)
+if mixup:
+    margin = MixupArcLossMargin(input_dim=feature_dim, class_number=train_dataset.class_nums)
+    margin = margin.to(device)
+else:
+    margin = ArcLossMargin(input_dim=feature_dim, class_number=train_dataset.class_nums)
+    margin = margin.to(device)
 
-criterion = torch.nn.CrossEntropyLoss().to(device)
+criterion = LabelSmoothing().to(device)
 lambda1 = lambda step: (step / warmup) if step < warmup else 0.5 * (math.cos((step - warmup) / (epochs * len_train - warmup) * math.pi) + 1)
 optimizer = optim.SGD([
         {'params': backbone.parameters(), 'weight_decay': 5e-4},
@@ -81,9 +87,15 @@ for epoch in range(epochs):
         backbone.train()
         margin.train()
         inputs, targets = inputs.to(device), targets.to(device)
-        feature = backbone(inputs)
-        outputs = margin(feature, targets, device=device, mixed_precision=mixed_precision)
-        loss = criterion(outputs, targets)
+        if mixup:
+            inputs, targets_a, targets_b, lam = mixup_data(inputs, targets, alpha)
+            feature = backbone(inputs)
+            outputs = margin(feature, targets_a, targets_b, lam, device=device, mixed_precision=mixed_precision)
+            loss = mixup_criterion(criterion, outputs, targets_a, targets_b, lam)
+        else:
+            feature = backbone(inputs)
+            outputs = margin(feature, targets, device=device, mixed_precision=mixed_precision)
+            loss = criterion(outputs, targets)
         if mixed_precision:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
@@ -92,10 +104,14 @@ for epoch in range(epochs):
         if iter_idx % accumulate == 0:
             optimizer.step()
             optimizer.zero_grad()
-        train_loss += loss.item()
+        train_loss += loss.item() / batch_size
         _, predicted = outputs.max(1)
         total += targets.size(0)
-        correct += predicted.eq(targets).sum().item()
+        if mixup:
+            correct += (lam * predicted.eq(targets_a.data).cpu().sum().float()
+                        + (1 - lam) * predicted.eq(targets_b.data).cpu().sum().float())
+        else:
+            correct += predicted.eq(targets).sum().item()
         batch_idx += 1
         iter_idx += 1
         if batch_idx % 20 == 0:
@@ -105,9 +121,9 @@ for epoch in range(epochs):
                 f'Learning Rate: {optimizer.param_groups[0]["lr"]:f} ' \
                 f'Speed: {batch_size * 20 / time_total:.2f} samples/sec Acc={correct / total:f} ' \
                 f'Loss={train_loss / (batch_idx + 1):f}'
-            writer.add_scalar('data/learning', optimizer.param_groups[0]["lr"], global_step=iter_idx)
-            writer.add_scalar('data/accuracy', correct / total, global_step=iter_idx)
-            writer.add_scalar('data/loss', train_loss / (batch_idx + 1), global_step=iter_idx)
+            writer.add_scalar('learning_rate', optimizer.param_groups[0]["lr"], global_step=iter_idx)
+            writer.add_scalar('train_accuracy', correct / total, global_step=iter_idx)
+            writer.add_scalar('train_loss', train_loss / (batch_idx + 1), global_step=iter_idx)
             print(train_status)
 
         if iter_idx % 2000 == 0:
@@ -120,6 +136,9 @@ for epoch in range(epochs):
             agedb_30_acc, _ = get_val_features(backbone, agedb_30_loader, agedb_30_dataset.issame_list,
                                                agedb_30_dataset.dataset_name, len_agedb_30, feature_dim, batch_size,
                                                device)
+
+            writer.add_scalars('test_accuracy', {'lfw_accuracy': lfw_acc, 'cfp_fp_accuracy': cfp_fp_acc,
+                                                 'agedb_30_accuracy': agedb_30_acc}, global_step=iter_idx)
 
             if agedb_30_acc > best_acc:
                 backbone_state = {
